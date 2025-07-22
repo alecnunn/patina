@@ -61,7 +61,7 @@ Compiler Info: rustc version 1.88.0 (6b00bc388 2025-06-23)
 Panic Handler: std::panicking::rust_panic_with_hook
 Allocator: System allocator
 Build Profile: release
-Target Triple: x86_64-pc-windows-msvc
+Target Triple: x86_64-unknown-linux-gnu
 
 === Project Structure ===
 Source Paths (10):

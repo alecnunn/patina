@@ -229,13 +229,14 @@ fn detect_rust_binary(strings: &[String], is_stripped: bool) -> bool {
 
 fn detect_rust_version(strings: &[String]) -> Option<(String, Confidence)> {
     // High confidence - explicit version string with "rustc" and version
-    let version_regex = Regex::new(r"rustc\s+version\s+(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?)").ok()?;
+    let version_regex =
+        Regex::new(r"rustc\s+version\s+(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?)").ok()?;
     for s in strings {
         if let Some(caps) = version_regex.captures(s) {
             return Some((caps[1].to_string(), Confidence::High));
         }
     }
-    
+
     // High confidence - alternative rustc version format
     let alt_version_regex = Regex::new(r"rustc\s+(\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?)").ok()?;
     for s in strings {
@@ -272,7 +273,7 @@ fn detect_rust_version(strings: &[String]) -> Option<(String, Confidence)> {
     // Look for /rustc/HASH/library patterns
     let rustc_hash_regex = Regex::new(r"[/\\]rustc[/\\]([a-f0-9]{40})[/\\]").ok()?;
     let mut rustc_hash: Option<String> = None;
-    
+
     // First find the rustc hash
     for s in strings {
         if let Some(caps) = rustc_hash_regex.captures(s) {
@@ -280,7 +281,7 @@ fn detect_rust_version(strings: &[String]) -> Option<(String, Confidence)> {
             break;
         }
     }
-    
+
     // If we found a rustc hash, look for version in strings containing "rustc version"
     if rustc_hash.is_some() {
         for s in strings {
@@ -302,8 +303,11 @@ fn detect_rust_version(strings: &[String]) -> Option<(String, Confidence)> {
     for s in strings {
         // Only consider strings that explicitly mention rust/rustc/cargo
         if (s.contains("rustc") || s.contains("rust compiler") || s.contains("rust version"))
-            && !s.contains("/deps/") && !s.contains("\\deps\\") 
-            && !s.contains("/registry/") && !s.contains("\\registry\\") {
+            && !s.contains("/deps/")
+            && !s.contains("\\deps\\")
+            && !s.contains("/registry/")
+            && !s.contains("\\registry\\")
+        {
             if let Some(caps) = simple_version.captures(s) {
                 let version = &caps[1];
                 // Rust versions start with 1.x and are typically < 2.0
@@ -640,36 +644,142 @@ fn detect_project_paths(strings: &[String]) -> Vec<(String, Confidence)> {
 }
 
 fn detect_target_triple(strings: &[String]) -> Option<(String, Confidence)> {
-    // Common target triples
-    let target_patterns = [
-        ("x86_64-pc-windows-msvc", Confidence::High),
-        ("x86_64-pc-windows-gnu", Confidence::High),
-        ("i686-pc-windows-msvc", Confidence::High),
-        ("i686-pc-windows-gnu", Confidence::High),
-        ("x86_64-unknown-linux-gnu", Confidence::High),
-        ("x86_64-apple-darwin", Confidence::High),
-        ("aarch64-apple-darwin", Confidence::High),
-        ("aarch64-unknown-linux-gnu", Confidence::High),
-    ];
+    // Look for target triple in compiler/toolchain paths
+    // Example: /home/user/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/
+    let toolchain_regex =
+        Regex::new(r"toolchains/[^/\\]+-([a-zA-Z0-9_]+-[a-zA-Z0-9_]+-[a-zA-Z0-9_-]+)").ok()?;
 
-    for (triple, confidence) in &target_patterns {
-        if strings.iter().any(|s| s.contains(triple)) {
-            return Some((triple.to_string(), *confidence));
+    for s in strings {
+        if let Some(caps) = toolchain_regex.captures(s) {
+            let triple = caps[1].to_string();
+            // Validate it's a known triple pattern
+            if is_valid_target_triple(&triple) {
+                return Some((triple, Confidence::High));
+            }
         }
     }
 
-    // Look for partial matches
-    if strings.iter().any(|s| s.contains("pc-windows-msvc")) {
-        return Some(("*-pc-windows-msvc".to_string(), Confidence::Medium));
+    // Look for target triple in cargo target directories
+    // Example: target/x86_64-unknown-linux-gnu/release
+    let target_dir_regex =
+        Regex::new(r"target[/\\]([a-zA-Z0-9_]+-[a-zA-Z0-9_]+-[a-zA-Z0-9_-]+)[/\\]").ok()?;
+
+    for s in strings {
+        if let Some(caps) = target_dir_regex.captures(s) {
+            let triple = caps[1].to_string();
+            if is_valid_target_triple(&triple) {
+                return Some((triple, Confidence::High));
+            }
+        }
     }
-    if strings.iter().any(|s| s.contains("pc-windows-gnu")) {
-        return Some(("*-pc-windows-gnu".to_string(), Confidence::Medium));
+
+    // Look for platform-specific library references
+    // High confidence based on actual system libraries
+    for s in strings {
+        // Linux-specific
+        if s.contains("ld-linux") || s.contains("/lib64/ld-linux") || s.contains("libc.so.6") {
+            // Check if it's actually x86_64 or another arch
+            if s.contains("x86-64") || s.contains("x86_64") {
+                return Some(("x86_64-unknown-linux-gnu".to_string(), Confidence::High));
+            } else if s.contains("aarch64") {
+                return Some(("aarch64-unknown-linux-gnu".to_string(), Confidence::High));
+            } else {
+                return Some(("*-unknown-linux-gnu".to_string(), Confidence::Medium));
+            }
+        }
+
+        // Windows-specific DLLs
+        if s.contains("kernel32.dll") || s.contains("ntdll.dll") || s.contains("msvcrt.dll") {
+            // Try to determine if MSVC or GNU
+            if strings
+                .iter()
+                .any(|s2| s2.contains("vcruntime") || s2.contains("msvcr"))
+            {
+                return Some(("*-pc-windows-msvc".to_string(), Confidence::Medium));
+            } else if strings
+                .iter()
+                .any(|s2| s2.contains("libgcc") || s2.contains("libstdc++"))
+            {
+                return Some(("*-pc-windows-gnu".to_string(), Confidence::Medium));
+            } else {
+                return Some(("*-pc-windows-*".to_string(), Confidence::Low));
+            }
+        }
+
+        // macOS-specific
+        if s.contains("/usr/lib/dyld") || s.contains("libSystem.B.dylib") {
+            if s.contains("arm64") || strings.iter().any(|s2| s2.contains("arm64")) {
+                return Some(("aarch64-apple-darwin".to_string(), Confidence::High));
+            } else {
+                return Some(("x86_64-apple-darwin".to_string(), Confidence::High));
+            }
+        }
     }
-    if strings.iter().any(|s| s.contains("unknown-linux-gnu")) {
-        return Some(("*-unknown-linux-gnu".to_string(), Confidence::Medium));
+
+    // Low confidence - look for target triple patterns in isolation
+    // Only if they appear in contexts that suggest they're the build target
+    let triple_regex = Regex::new(r"\b([a-zA-Z0-9_]+-[a-zA-Z0-9_]+-[a-zA-Z0-9_-]+)\b").ok()?;
+    for s in strings {
+        if (s.contains("target") || s.contains("platform") || s.contains("arch")) 
+            && !s.contains("detect_target_triple") // Avoid matching our own code
+            && !s.contains("target_patterns")
+        {
+            if let Some(caps) = triple_regex.captures(s) {
+                let potential_triple = caps[1].to_string();
+                if is_valid_target_triple(&potential_triple) {
+                    return Some((potential_triple, Confidence::Low));
+                }
+            }
+        }
     }
 
     None
+}
+
+fn is_valid_target_triple(triple: &str) -> bool {
+    let parts: Vec<&str> = triple.split('-').collect();
+    if parts.len() < 3 {
+        return false;
+    }
+
+    // Check architecture
+    let valid_archs = [
+        "x86_64",
+        "i686",
+        "i586",
+        "aarch64",
+        "arm",
+        "armv7",
+        "armv6",
+        "riscv64",
+        "riscv32",
+        "mips",
+        "mipsel",
+        "powerpc",
+        "powerpc64",
+        "s390x",
+        "wasm32",
+    ];
+    if !valid_archs.contains(&parts[0]) {
+        return false;
+    }
+
+    // Check vendor
+    let valid_vendors = ["unknown", "pc", "apple", "sun", "fortanix", "uwp", "wrs"];
+    if !valid_vendors.contains(&parts[1]) {
+        return false;
+    }
+
+    // Check OS
+    let valid_os = [
+        "linux", "windows", "darwin", "freebsd", "netbsd", "openbsd", "android", "ios", "fuchsia",
+        "redox", "none", "wasi",
+    ];
+    let os_part = parts[2]
+        .split_once('-')
+        .map(|(os, _)| os)
+        .unwrap_or(parts[2]);
+    valid_os.iter().any(|&os| os_part == os)
 }
 
 fn format_with_confidence(text: &str, confidence: Confidence) -> ColoredString {
